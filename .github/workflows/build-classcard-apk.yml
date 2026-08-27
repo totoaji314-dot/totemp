@@ -1,8 +1,8 @@
-name: Build ClassCard AI Helper APK
+name: Build ClassCard Study Lens Safe APK
 on:
   workflow_dispatch:
   push:
-    branches: [ classcard-ai-helper-build ]
+    branches: [ classcard-study-lens-safe ]
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -20,5 +20,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: ClassCard-Study-Lens-V2-APK
+          name: ClassCard-Study-Lens-SAFE-APK
           path: app/build/outputs/apk/debug/app-debug.apk
