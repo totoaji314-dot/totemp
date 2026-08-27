@@ -5,7 +5,6 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
-import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.graphics.Bitmap;
@@ -37,12 +36,15 @@ import com.google.mlkit.vision.common.InputImage;
 import com.google.mlkit.vision.text.Text;
 import com.google.mlkit.vision.text.TextRecognition;
 import com.google.mlkit.vision.text.TextRecognizer;
-import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
+import com.google.mlkit.vision.text.korean.KoreanTextRecognizerOptions;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class CaptureService extends Service {
@@ -51,11 +53,10 @@ public class CaptureService extends Service {
     public static final String EXTRA_RESULT_CODE = "resultCode";
     public static final String EXTRA_RESULT_DATA = "resultData";
 
-    private static final String CHANNEL = "screen_analysis";
-    private static final int NOTIFICATION_ID = 41;
-    private static final long OCR_INTERVAL_MS = 320L;
-    private static final long ANSWER_MIN_INTERVAL_MS = 650L;
-    private static final int AUTO_TAP_MIN_CONFIDENCE = 78;
+    private static final String CHANNEL = "study_lens_v3";
+    private static final int NOTIFICATION_ID = 43;
+    private static final long OCR_INTERVAL_MS = 260L;
+    private static final int AUTO_TAP_CONFIDENCE = 82;
 
     public interface UiListener { void onUpdate(String status, String question, String answer); }
     private static volatile UiListener uiListener;
@@ -73,11 +74,15 @@ public class CaptureService extends Service {
     private TextView answerBubble;
     private View highlight;
     private long lastOcrAt = 0L;
-    private long lastAnswerAt = 0L;
-    private String lastSignature = "";
     private int screenWidth;
     private int screenHeight;
     private volatile boolean running = false;
+
+    private volatile String rememberedEnglish = "";
+    private volatile String translatedMeaning = "";
+    private volatile String translatedFor = "";
+    private volatile String lastTappedWord = "";
+    private volatile List<LineBox> cachedChoices = new ArrayList<>();
 
     private static final class LineBox {
         final String text;
@@ -85,12 +90,27 @@ public class CaptureService extends Service {
         LineBox(String text, Rect rect) { this.text = text; this.rect = rect; }
     }
 
+    private static final class ChoiceResult {
+        final LineBox line;
+        final int confidence;
+        final String reason;
+        ChoiceResult(LineBox line, int confidence, String reason) {
+            this.line = line;
+            this.confidence = confidence;
+            this.reason = reason;
+        }
+    }
+
     @Override
     public void onCreate() {
         super.onCreate();
         prefs = new SecurePrefs(this);
-        recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
+        recognizer = TextRecognition.getClient(new KoreanTextRecognizerOptions.Builder().build());
         windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
+        ShizukuTapManager.init(this);
+        OfflineTranslator.get(this).ensureModel((ready, message) -> {
+            if (!ready) updateUi("번역 모델 준비 필요", rememberedEnglish, message);
+        });
         createChannel();
     }
 
@@ -140,23 +160,24 @@ public class CaptureService extends Service {
         projection.registerCallback(new MediaProjection.Callback() {
             @Override public void onStop() {
                 running = false;
-                updateUi("화면 공유 종료", "", "");
+                updateUi("화면 공유 종료", rememberedEnglish, "");
                 removeOverlay();
             }
         }, new Handler(getMainLooper()));
 
         imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2);
-        captureThread = new HandlerThread("study-lens-capture");
+        captureThread = new HandlerThread("study-lens-v3-capture");
         captureThread.start();
         captureHandler = new Handler(captureThread.getLooper());
         imageReader.setOnImageAvailableListener(this::onImageAvailable, captureHandler);
-        virtualDisplay = projection.createVirtualDisplay("StudyLens",
-                screenWidth, screenHeight, density,
+        virtualDisplay = projection.createVirtualDisplay(
+                "StudyLensV3", screenWidth, screenHeight, density,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                 imageReader.getSurface(), null, captureHandler);
+
         running = true;
-        showBubble("무료 로컬 분석 준비됨");
-        updateUi("실시간 화면 분석 중", "", "");
+        showBubble("영어 단어를 기다리는 중…");
+        updateUi("실시간 분석 중", "-", "5초 영어 단어를 기다리는 중");
     }
 
     private void onImageAvailable(ImageReader reader) {
@@ -197,149 +218,291 @@ public class CaptureService extends Service {
         }).addOnFailureListener(e -> {
             frame.recycle();
             ocrBusy.set(false);
-            updateUi("글자 인식 오류", "", "");
+            updateUi("글자 인식 오류", rememberedEnglish, "한국어 OCR 오류");
         });
     }
 
     private void handleText(Text result) {
-        StringBuilder full = new StringBuilder();
         List<LineBox> lines = new ArrayList<>();
+        StringBuilder full = new StringBuilder();
         for (Text.TextBlock block : result.getTextBlocks()) {
             for (Text.Line line : block.getLines()) {
                 String t = line.getText() == null ? "" : line.getText().trim();
                 Rect r = line.getBoundingBox();
-                String low = t.toLowerCase(Locale.ROOT);
-                if (!t.isEmpty() && r != null && !low.contains("study lens") && !low.contains("무료 로컬 분석")) {
-                    lines.add(new LineBox(t, new Rect(r)));
-                    full.append(t).append('\n');
-                }
+                if (t.isEmpty() || r == null || isOurOverlay(t)) continue;
+                lines.add(new LineBox(t, new Rect(r)));
+                full.append(t).append('\n');
             }
         }
+
         String screenText = full.toString().trim();
-        if (screenText.length() < 6) return;
+        if (screenText.length() < 2) return;
         if (containsSensitive(screenText)) {
             clearHighlight();
             showBubble("민감정보 화면 · 분석 정지");
-            updateUi("민감 화면 감지", shortText(screenText), "");
+            updateUi("민감 화면 감지", rememberedEnglish, "분석 일시정지");
             return;
         }
 
-        learnPairIfPossible(lines, screenText);
-
-        String signature = normalize(screenText);
-        if (signature.equals(lastSignature)) return;
-        lastSignature = signature;
-        long now = System.currentTimeMillis();
-        if (now - lastAnswerAt < ANSWER_MIN_INTERVAL_MS) return;
-        lastAnswerAt = now;
-
-        List<String> choices = likelyChoices(lines);
-        LocalEnglishSolver.Answer answer = LocalEnglishSolver.solve(screenText, choices, prefs.getLearnedPairs());
-        updateUi("새 문제 분석 완료", shortText(screenText), answer.text.isEmpty() ? "판단 보류" : answer.text + " (" + answer.confidence + "%)");
-
-        if (answer.text.isEmpty() || answer.confidence < 45) {
-            clearHighlight();
-            if (prefs.isHighlightEnabled()) showBubble("확신 부족 · 직접 풀어주세요");
+        List<LineBox> choices = extractKoreanChoices(lines);
+        if (choices.size() >= 3) {
+            cachedChoices = copyLines(choices);
+            evaluateChoices(cachedChoices);
             return;
         }
 
-        LineBox best = findBestLine(answer.text, lines);
-        boolean assessment = containsAssessment(screenText);
-        presentAnswer(answer, best == null ? null : best.rect, assessment);
+        String prompt = detectEnglishPrompt(lines);
+        if (!prompt.isEmpty()) rememberPrompt(prompt);
     }
 
-    private void presentAnswer(LocalEnglishSolver.Answer answer, Rect rect, boolean assessment) {
+    private void rememberPrompt(String prompt) {
+        String normalized = normalizeEnglish(prompt);
+        if (normalized.length() < 2) return;
+        if (normalized.equals(normalizeEnglish(rememberedEnglish))) {
+            showBubble("기억: " + rememberedEnglish);
+            return;
+        }
+
+        rememberedEnglish = prompt.trim();
+        translatedMeaning = "";
+        translatedFor = "";
+        lastTappedWord = "";
+        cachedChoices = new ArrayList<>();
+        clearHighlight();
+
+        showBubble("기억: " + rememberedEnglish + " · 뜻 변환 중");
+        updateUi("영어 단어 기억 완료", rememberedEnglish, "뜻 변환 중…");
+
+        final String word = rememberedEnglish;
+        OfflineTranslator.get(this).translate(word, (translated, error) -> {
+            if (!normalizeEnglish(word).equals(normalizeEnglish(rememberedEnglish))) return;
+            if (translated == null || translated.trim().isEmpty()) {
+                updateUi("뜻 변환 실패", rememberedEnglish, error == null ? "번역 모델 확인 필요" : error);
+                showBubble("기억: " + rememberedEnglish + " · 번역 준비 필요");
+                return;
+            }
+            translatedMeaning = translated.trim();
+            translatedFor = word;
+            showBubble("기억: " + rememberedEnglish + " → " + translatedMeaning);
+            updateUi("단어 준비 완료", rememberedEnglish, "뜻: " + translatedMeaning);
+
+            List<LineBox> snapshot = cachedChoices;
+            if (snapshot != null && snapshot.size() >= 3) evaluateChoices(snapshot);
+        });
+    }
+
+    private void evaluateChoices(List<LineBox> choices) {
+        if (rememberedEnglish.isEmpty()) {
+            clearHighlight();
+            showBubble("앞의 영어 단어를 기다리는 중…");
+            updateUi("단어 기억 없음", "-", "먼저 5초 영어 화면을 보여주세요");
+            return;
+        }
+
+        List<String> choiceTexts = new ArrayList<>();
+        for (LineBox c : choices) choiceTexts.add(c.text);
+
+        ChoiceResult result = chooseBest(choices, choiceTexts);
+        if (result == null || result.line == null || result.confidence < 50) {
+            clearHighlight();
+            String target = translatedMeaning.isEmpty() ? "뜻 변환 중…" : translatedMeaning;
+            showBubble("기억: " + rememberedEnglish + " · " + target);
+            updateUi("보기 분석 중", rememberedEnglish, "뜻: " + target);
+            return;
+        }
+
         if (prefs.isHighlightEnabled()) {
-            showBubble("추천: " + answer.text + " · " + answer.confidence + "%");
-            if (rect != null) showHighlight(rect);
-            else clearHighlight();
+            showHighlight(result.line.rect);
+            showBubble("정답: " + result.line.text + " · " + result.confidence + "%");
         } else {
             clearHighlight();
             removeBubbleOnly();
         }
 
-        if (!prefs.isAutoTapEnabled() || rect == null || answer.confidence < AUTO_TAP_MIN_CONFIDENCE) return;
-        if (assessment) {
-            if (prefs.isHighlightEnabled()) showBubble("평가/점수 화면 · 자동 터치 OFF");
-            updateUi("평가 화면에서 자동 터치 차단", "", answer.text);
-            return;
-        }
-        if (!StudyAccessibilityService.isReady()) {
-            if (prefs.isHighlightEnabled()) showBubble("자동 터치 권한을 켜주세요");
-            updateUi("자동 터치 권한 필요", "", answer.text);
-            return;
-        }
+        updateUi("정답 후보 찾음", rememberedEnglish,
+                result.line.text + "  " + result.confidence + "% · " + result.reason);
 
-        final float x = rect.exactCenterX();
-        final float y = rect.exactCenterY();
+        if (!prefs.isAutoTapEnabled() || result.confidence < AUTO_TAP_CONFIDENCE) return;
+        if (normalizeEnglish(lastTappedWord).equals(normalizeEnglish(rememberedEnglish))) return;
+
+        lastTappedWord = rememberedEnglish;
+        final float x = result.line.rect.exactCenterX();
+        final float y = result.line.rect.exactCenterY();
         new Handler(getMainLooper()).postDelayed(() -> {
-            boolean ok = StudyAccessibilityService.tap(x, y);
-            if (ok) {
-                if (prefs.isHighlightEnabled()) showBubble("연습 자동 선택 ✓  " + answer.text);
-                updateUi("연습 자동 터치 완료", "", answer.text);
-            } else {
-                if (prefs.isHighlightEnabled()) showBubble("ClassCard 화면에서만 자동 터치 가능");
-                updateUi("자동 터치 대기", "", answer.text);
-            }
-        }, 380L);
+            ShizukuTapManager.tapClassCard(x, y, (success, message) -> {
+                if (!success) {
+                    lastTappedWord = "";
+                    updateUi("자동 터치 대기", rememberedEnglish, message);
+                    if (prefs.isHighlightEnabled()) showBubble("정답: " + result.line.text + " · " + message);
+                } else {
+                    updateUi("자동 터치 완료", rememberedEnglish, result.line.text + " ✓");
+                    if (prefs.isHighlightEnabled()) showBubble("자동 선택 ✓  " + result.line.text);
+                }
+            });
+        }, 260L);
     }
 
-    private List<String> likelyChoices(List<LineBox> lines) {
-        List<String> out = new ArrayList<>();
-        int cutoff = (int)(screenHeight * 0.30f);
-        for (LineBox l : lines) {
-            String t = l.text.trim();
-            if (l.rect.centerY() < cutoff) continue;
-            if (t.length() > 70 || t.length() < 1) continue;
-            String low = t.toLowerCase(Locale.ROOT);
-            if (low.contains("classcard") || low.contains("study lens") || low.contains("점수") || low.contains("남은 시간") || low.contains("다음")) continue;
-            out.add(t);
+    private ChoiceResult chooseBest(List<LineBox> choices, List<String> choiceTexts) {
+        String word = rememberedEnglish;
+        String translated = translatedMeaning;
+        Map<String, String> learned = prefs.getLearnedPairs();
+        String learnedMeaning = learned.get(normalizeEnglish(word));
+
+        double best = -1.0;
+        double second = -1.0;
+        LineBox bestLine = null;
+        String reason = "무료 번역";
+
+        for (LineBox line : choices) {
+            double score = 0.0;
+            if (translated != null && !translated.isEmpty()) score = Math.max(score, koreanSimilarity(translated, line.text));
+            if (learnedMeaning != null && !learnedMeaning.isEmpty()) score = Math.max(score, koreanSimilarity(learnedMeaning, line.text));
+            if (score > best) {
+                second = best;
+                best = score;
+                bestLine = line;
+            } else if (score > second) {
+                second = score;
+            }
         }
-        if (out.size() < 2) {
-            out.clear();
-            int start = Math.max(0, lines.size() - 6);
-            for (int i = start; i < lines.size(); i++) out.add(lines.get(i).text);
+
+        LocalEnglishSolver.Answer local = LocalEnglishSolver.solve(
+                word + "\n한국어 뜻을 고르세요", choiceTexts, learned);
+        if (local != null && !local.text.isEmpty()) {
+            LineBox localLine = findLine(local.text, choices);
+            if (localLine != null) {
+                double localScore = Math.max(0.0, Math.min(1.0, local.confidence / 100.0));
+                if (bestLine == null || localScore > best) {
+                    second = best;
+                    best = localScore;
+                    bestLine = localLine;
+                    reason = local.reason.isEmpty() ? "로컬 단어 사전" : local.reason;
+                }
+            }
+        }
+
+        if (bestLine == null) return null;
+
+        double margin = best - Math.max(0.0, second);
+        int confidence;
+        if (best >= 0.99) confidence = 99;
+        else if (best >= 0.92) confidence = 96;
+        else if (best >= 0.82) confidence = 91;
+        else if (best >= 0.70) confidence = 85;
+        else if (best >= 0.56) confidence = 75;
+        else if (best >= 0.42) confidence = 62;
+        else confidence = 45;
+
+        if (margin < 0.08 && best < 0.92) confidence = Math.min(confidence, 68);
+        if (translated == null || translated.isEmpty()) reason = "로컬 단어 사전";
+        else reason = "뜻 " + translated;
+
+        return new ChoiceResult(bestLine, confidence, reason);
+    }
+
+    private List<LineBox> extractKoreanChoices(List<LineBox> lines) {
+        List<LineBox> out = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        int minY = (int) (screenHeight * 0.25f);
+        for (LineBox line : lines) {
+            String t = cleanChoice(line.text);
+            if (line.rect.centerY() < minY) continue;
+            if (!t.matches(".*[가-힣].*")) continue;
+            if (t.length() < 1 || t.length() > 55) continue;
+            if (isUiKorean(t)) continue;
+            String key = normalizeKorean(t);
+            if (key.length() < 1 || seen.contains(key)) continue;
+            seen.add(key);
+            out.add(new LineBox(t, new Rect(line.rect)));
+        }
+
+        if (out.size() > 4) {
+            List<LineBox> bottom = new ArrayList<>();
+            for (int i = Math.max(0, out.size() - 4); i < out.size(); i++) bottom.add(out.get(i));
+            return bottom;
         }
         return out;
     }
 
-    private void learnPairIfPossible(List<LineBox> lines, String screenText) {
-        if (containsAssessment(screenText) || screenText.contains("___") || screenText.contains("____")) return;
-        List<String> english = new ArrayList<>();
-        List<String> korean = new ArrayList<>();
-        for (LineBox l : lines) {
-            String t = l.text.trim();
-            if (t.length() > 42) continue;
-            if (t.matches("[A-Za-z][A-Za-z' -]{1,35}") && t.split("\\s+").length <= 5 && !isUiLine(t)) english.add(t);
-            if (t.matches(".*[가-힣].*") && !isUiLine(t) && t.length() <= 32) korean.add(t);
+    private String detectEnglishPrompt(List<LineBox> lines) {
+        LineBox best = null;
+        double bestScore = -1;
+        for (LineBox line : lines) {
+            String t = line.text.trim();
+            if (!t.matches("[A-Za-z][A-Za-z' -]{1,42}")) continue;
+            if (t.split("\\s+").length > 4) continue;
+            if (isUiEnglish(t)) continue;
+            if (line.rect.centerY() < screenHeight * 0.08f || line.rect.centerY() > screenHeight * 0.82f) continue;
+
+            double centerPenalty = Math.abs(line.rect.centerX() - screenWidth / 2.0) / Math.max(1.0, screenWidth);
+            double score = line.rect.height() * 2.2 + line.rect.width() * 0.03 - centerPenalty * 80.0;
+            if (score > bestScore) {
+                bestScore = score;
+                best = line;
+            }
         }
-        if (english.size() == 1 && korean.size() == 1) prefs.saveLearnedPair(english.get(0), korean.get(0));
+        return best == null ? "" : best.text.trim();
     }
 
-    private boolean isUiLine(String s) {
-        String n = s.toLowerCase(Locale.ROOT);
-        return n.contains("classcard") || n.contains("정답") || n.contains("다음") || n.contains("학습") || n.contains("점수") || n.contains("study lens");
+    private static List<LineBox> copyLines(List<LineBox> in) {
+        List<LineBox> out = new ArrayList<>();
+        for (LineBox l : in) out.add(new LineBox(l.text, new Rect(l.rect)));
+        return out;
     }
 
-    private boolean containsAssessment(String s) {
-        String n = s.toLowerCase(Locale.ROOT);
-        String[] keys = {"점수", "성적", "제출", "평가", "시험", "과제", "숙제", "선생님", "score", "submit", "grade", "result", "ranking", "제한시간"};
-        for (String k : keys) if (n.contains(k)) return true;
-        return false;
+    private static LineBox findLine(String answer, List<LineBox> lines) {
+        String a = normalizeKorean(answer);
+        for (LineBox l : lines) {
+            String b = normalizeKorean(l.text);
+            if (a.equals(b) || a.contains(b) || b.contains(a)) return l;
+        }
+        return null;
+    }
+
+    private static double koreanSimilarity(String a, String b) {
+        String x = normalizeKorean(a);
+        String y = normalizeKorean(b);
+        if (x.isEmpty() || y.isEmpty()) return 0.0;
+        if (x.equals(y)) return 1.0;
+        if (x.contains(y) || y.contains(x)) return 0.95;
+
+        double tokenScore = 0.0;
+        String[] xt = x.split(" ");
+        for (String token : xt) {
+            if (token.length() >= 2 && y.contains(token)) tokenScore = Math.max(tokenScore, 0.78);
+        }
+
+        double edit = similarity(x.replace(" ", ""), y.replace(" ", ""));
+        return Math.max(tokenScore, edit);
+    }
+
+    private static double similarity(String a, String b) {
+        if (a.isEmpty() || b.isEmpty()) return 0.0;
+        int[][] dp = new int[a.length()+1][b.length()+1];
+        for (int i=0;i<=a.length();i++) dp[i][0]=i;
+        for (int j=0;j<=b.length();j++) dp[0][j]=j;
+        for (int i=1;i<=a.length();i++) {
+            for (int j=1;j<=b.length();j++) {
+                int cost = a.charAt(i-1)==b.charAt(j-1)?0:1;
+                dp[i][j]=Math.min(Math.min(dp[i-1][j]+1,dp[i][j-1]+1),dp[i-1][j-1]+cost);
+            }
+        }
+        int max = Math.max(a.length(), b.length());
+        return 1.0 - ((double)dp[a.length()][b.length()] / max);
     }
 
     private void showHighlight(Rect rect) {
         new Handler(getMainLooper()).post(() -> {
             clearHighlightInternal();
             GradientDrawable bg = new GradientDrawable();
-            bg.setColor(0x1819C37D);
+            bg.setColor(0x1919C37D);
             bg.setStroke(dp(4), 0xFF16A765);
             bg.setCornerRadius(dp(16));
             View v = new View(this);
             v.setBackground(bg);
             WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
-                    Math.max(dp(64), rect.width() + dp(22)),
-                    Math.max(dp(44), rect.height() + dp(18)),
+                    Math.max(dp(70), rect.width() + dp(24)),
+                    Math.max(dp(46), rect.height() + dp(20)),
                     Build.VERSION.SDK_INT >= 26 ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY : WindowManager.LayoutParams.TYPE_PHONE,
                     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE |
                             WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE |
@@ -347,12 +510,12 @@ public class CaptureService extends Service {
                             WindowManager.LayoutParams.FLAG_SECURE,
                     PixelFormat.TRANSLUCENT);
             lp.gravity = Gravity.TOP | Gravity.START;
-            lp.x = Math.max(0, rect.left - dp(11));
-            lp.y = Math.max(0, rect.top - dp(9));
+            lp.x = Math.max(0, rect.left - dp(12));
+            lp.y = Math.max(0, rect.top - dp(10));
             try {
                 windowManager.addView(v, lp);
                 highlight = v;
-            } catch (Exception ignored) { }
+            } catch (Exception ignored) {}
         });
     }
 
@@ -378,7 +541,7 @@ public class CaptureService extends Service {
                                 WindowManager.LayoutParams.FLAG_SECURE,
                         PixelFormat.TRANSLUCENT);
                 lp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
-                lp.y = dp(50);
+                lp.y = dp(48);
                 try {
                     windowManager.addView(tv, lp);
                     answerBubble = tv;
@@ -391,7 +554,7 @@ public class CaptureService extends Service {
     private void removeBubbleOnly() {
         new Handler(getMainLooper()).post(() -> {
             if (answerBubble != null) {
-                try { windowManager.removeView(answerBubble); } catch (Exception ignored) { }
+                try { windowManager.removeView(answerBubble); } catch (Exception ignored) {}
                 answerBubble = null;
             }
         });
@@ -401,7 +564,7 @@ public class CaptureService extends Service {
 
     private void clearHighlightInternal() {
         if (highlight != null) {
-            try { windowManager.removeView(highlight); } catch (Exception ignored) { }
+            try { windowManager.removeView(highlight); } catch (Exception ignored) {}
             highlight = null;
         }
     }
@@ -410,41 +573,10 @@ public class CaptureService extends Service {
         new Handler(getMainLooper()).post(() -> {
             clearHighlightInternal();
             if (answerBubble != null) {
-                try { windowManager.removeView(answerBubble); } catch (Exception ignored) { }
+                try { windowManager.removeView(answerBubble); } catch (Exception ignored) {}
                 answerBubble = null;
             }
         });
-    }
-
-    private LineBox findBestLine(String answer, List<LineBox> lines) {
-        String a = normalize(answer);
-        LineBox best = null;
-        double bestScore = 0.0;
-        for (LineBox line : lines) {
-            String b = normalize(line.text.replaceFirst("^[A-Da-d][.)]\\s*", ""));
-            if (b.isEmpty()) continue;
-            double score;
-            if (b.equals(a)) score = 1.0;
-            else if (b.contains(a) || a.contains(b)) score = 0.93;
-            else score = similarity(a, b);
-            if (score > bestScore) { bestScore = score; best = line; }
-        }
-        return bestScore >= 0.52 ? best : null;
-    }
-
-    private static double similarity(String a, String b) {
-        if (a.isEmpty() || b.isEmpty()) return 0.0;
-        int[][] dp = new int[a.length()+1][b.length()+1];
-        for (int i=0;i<=a.length();i++) dp[i][0]=i;
-        for (int j=0;j<=b.length();j++) dp[0][j]=j;
-        for (int i=1;i<=a.length();i++) {
-            for (int j=1;j<=b.length();j++) {
-                int cost = a.charAt(i-1)==b.charAt(j-1)?0:1;
-                dp[i][j]=Math.min(Math.min(dp[i-1][j]+1,dp[i][j-1]+1),dp[i-1][j-1]+cost);
-            }
-        }
-        int max = Math.max(a.length(), b.length());
-        return 1.0 - ((double)dp[a.length()][b.length()] / max);
     }
 
     private boolean containsSensitive(String s) {
@@ -454,11 +586,39 @@ public class CaptureService extends Service {
         return false;
     }
 
-    private static String normalize(String s) { return s == null ? "" : s.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9가-힣]+", " ").trim(); }
+    private static boolean isOurOverlay(String s) {
+        String n = s.toLowerCase(Locale.ROOT);
+        return n.contains("study lens") || n.startsWith("기억:") || n.startsWith("정답:") || n.contains("자동 선택") || n.contains("영어 단어를 기다리는 중");
+    }
 
-    private static String shortText(String s) {
-        String one = s.replace('\n', ' ').replaceAll("\\s+", " ").trim();
-        return one.length() > 180 ? one.substring(0, 180) + "…" : one;
+    private static boolean isUiEnglish(String s) {
+        String n = s.toLowerCase(Locale.ROOT).trim();
+        String[] exact = {"classcard", "next", "skip", "correct", "wrong", "start", "loading", "study lens", "word test", "vocabulary test"};
+        for (String e : exact) if (n.equals(e)) return true;
+        return n.contains("classcard") || n.contains("study lens");
+    }
+
+    private static boolean isUiKorean(String s) {
+        String n = s.replace(" ", "");
+        String[] keys = {"다음문제", "남은시간", "정답률", "학습종료", "문제수", "점수", "결과보기", "다시하기", "정답표시", "자동터치"};
+        for (String k : keys) if (n.contains(k)) return true;
+        return false;
+    }
+
+    private static String cleanChoice(String s) {
+        return s == null ? "" : s.trim().replaceFirst("^[①②③④1-4A-Da-d][.)]?\\s*", "").trim();
+    }
+
+    private static String normalizeEnglish(String s) {
+        return s == null ? "" : s.toLowerCase(Locale.ROOT)
+                .replaceAll("[^a-z' -]", " ")
+                .replaceAll("\\s+", " ").trim();
+    }
+
+    private static String normalizeKorean(String s) {
+        return s == null ? "" : s.toLowerCase(Locale.ROOT)
+                .replaceAll("[^가-힣a-z0-9 ]", " ")
+                .replaceAll("\\s+", " ").trim();
     }
 
     private void updateUi(String status, String question, String answer) {
@@ -474,8 +634,8 @@ public class CaptureService extends Service {
         PendingIntent openPi = PendingIntent.getActivity(this, 3, open, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         return new NotificationCompat.Builder(this, CHANNEL)
                 .setSmallIcon(android.R.drawable.ic_menu_view)
-                .setContentTitle("ClassCard Study Lens")
-                .setContentText("무료 로컬 화면 분석 실행 중")
+                .setContentTitle("Study Lens V3")
+                .setContentText("5초 단어 → 4지선다 실시간 분석 중")
                 .setOngoing(true)
                 .setContentIntent(openPi)
                 .addAction(android.R.drawable.ic_media_pause, "즉시 중지", stopPi)
@@ -484,8 +644,8 @@ public class CaptureService extends Service {
 
     private void createChannel() {
         if (Build.VERSION.SDK_INT >= 26) {
-            NotificationChannel ch = new NotificationChannel(CHANNEL, "실시간 화면 분석", NotificationManager.IMPORTANCE_LOW);
-            ch.setDescription("영어 학습 화면을 기기에서 분석합니다.");
+            NotificationChannel ch = new NotificationChannel(CHANNEL, "Study Lens 실시간 분석", NotificationManager.IMPORTANCE_LOW);
+            ch.setDescription("영어 단어와 한국어 4지선다를 기기에서 분석합니다.");
             getSystemService(NotificationManager.class).createNotificationChannel(ch);
         }
     }
@@ -498,13 +658,13 @@ public class CaptureService extends Service {
         if (projection != null) { projection.stop(); projection = null; }
         if (captureThread != null) { captureThread.quitSafely(); captureThread = null; }
         stopForeground(STOP_FOREGROUND_REMOVE);
-        updateUi("정지", "", "");
+        updateUi("정지", rememberedEnglish, "");
     }
 
     @Override
     public void onDestroy() {
         stopEverything();
-        try { recognizer.close(); } catch (Exception ignored) { }
+        try { recognizer.close(); } catch (Exception ignored) {}
         super.onDestroy();
     }
 
