@@ -1,8 +1,6 @@
 name: Build ClassCard AI Helper APK
 on:
   workflow_dispatch:
-  push:
-    branches: [ classcard-ai-helper-build ]
 jobs:
   build:
     runs-on: ubuntu-latest
