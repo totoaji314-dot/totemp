@@ -11,7 +11,7 @@
         android:layout_height="wrap_content"
         android:orientation="vertical"
         android:paddingLeft="18dp"
-        android:paddingTop="22dp"
+        android:paddingTop="20dp"
         android:paddingRight="18dp"
         android:paddingBottom="28dp">
 
@@ -21,9 +21,9 @@
             android:background="@drawable/hero_bg"
             android:orientation="vertical"
             android:padding="20dp">
-            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="STUDY LENS SAFE" android:textColor="#B8C8FF" android:textSize="12sp" android:textStyle="bold" android:letterSpacing="0.10" />
-            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="7dp" android:text="ClassCard 화면 도우미" android:textColor="@android:color/white" android:textSize="28sp" android:textStyle="bold" />
-            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:text="API 키 없이, 휴대폰 안에서 영어 문제를 읽고 정답 위치를 표시해요." android:textColor="#DDE5FF" android:textSize="14sp" />
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="STUDY LENS V3" android:textColor="#B8C8FF" android:textSize="12sp" android:textStyle="bold" android:letterSpacing="0.10" />
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="7dp" android:text="ClassCard 자동 학습 도우미" android:textColor="@android:color/white" android:textSize="27sp" android:textStyle="bold" />
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:text="5초 영어 단어를 기억하고, 한국어 4지선다가 뜨면 기기 안에서 뜻을 비교해요." android:textColor="#DDE5FF" android:textSize="14sp" />
         </LinearLayout>
 
         <LinearLayout
@@ -34,6 +34,7 @@
             android:orientation="vertical"
             android:padding="17dp">
             <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="동작 모드" android:textColor="@color/text" android:textSize="18sp" android:textStyle="bold" />
+
             <com.google.android.material.switchmaterial.SwitchMaterial
                 android:id="@+id/highlightSwitch"
                 android:layout_width="match_parent"
@@ -43,8 +44,73 @@
                 android:textColor="@color/text"
                 android:textSize="16sp"
                 app:useMaterialThemeColors="true" />
-            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="-3dp" android:paddingRight="24dp" android:text="정답으로 판단한 보기 위에 초록 테두리를 표시합니다." android:textColor="@color/muted" android:textSize="12sp" />
-            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="14dp" android:background="#EEF4FF" android:padding="12dp" android:text="설치 차단을 피하기 위해 이 버전에서는 자동 터치 접근성 권한을 제거했습니다. 마지막 선택은 직접 눌러주세요." android:textColor="#38527A" android:textSize="12sp" />
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="-3dp" android:paddingRight="36dp" android:text="찾은 한국어 보기 위에 초록 테두리를 표시해요." android:textColor="@color/muted" android:textSize="12sp" />
+
+            <View android:layout_width="match_parent" android:layout_height="1dp" android:layout_marginTop="14dp" android:layout_marginBottom="8dp" android:background="#EDF0F5" />
+
+            <com.google.android.material.switchmaterial.SwitchMaterial
+                android:id="@+id/autoTapSwitch"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Shizuku 자동 터치"
+                android:textColor="@color/text"
+                android:textSize="16sp"
+                app:useMaterialThemeColors="true" />
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="-3dp" android:paddingRight="36dp" android:text="정답 확신이 높고 ClassCard가 앞에 있을 때만 자동으로 눌러요." android:textColor="@color/muted" android:textSize="12sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:background="@drawable/card_bg"
+            android:orientation="vertical"
+            android:padding="17dp">
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="무료 번역 엔진" android:textColor="@color/text" android:textSize="18sp" android:textStyle="bold" />
+            <TextView android:id="@+id/modelStatus" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:text="확인 중…" android:textColor="@color/muted" android:textSize="13sp" />
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/modelBtn"
+                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="10dp"
+                android:text="영어→한국어 모델 준비"
+                android:textAllCaps="false"
+                app:cornerRadius="14dp" />
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:text="처음 한 번만 번역 모델을 내려받고, 이후에는 API 키나 결제 없이 기기에서 사용해요." android:textColor="@color/muted" android:textSize="11sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:background="@drawable/card_bg"
+            android:orientation="vertical"
+            android:padding="17dp">
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Shizuku 자동 터치" android:textColor="@color/text" android:textSize="18sp" android:textStyle="bold" />
+            <TextView android:id="@+id/shizukuStatus" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:text="Shizuku 상태 확인 중…" android:textColor="@color/muted" android:textSize="13sp" android:textStyle="bold" />
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="10dp" android:orientation="horizontal">
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/openShizukuBtn"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                    android:layout_width="0dp"
+                    android:layout_height="48dp"
+                    android:layout_weight="1"
+                    android:text="Shizuku 열기"
+                    android:textAllCaps="false"
+                    app:cornerRadius="14dp" />
+                <Space android:layout_width="8dp" android:layout_height="1dp" />
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/shizukuBtn"
+                    android:layout_width="0dp"
+                    android:layout_height="48dp"
+                    android:layout_weight="1"
+                    android:text="권한 연결"
+                    android:textAllCaps="false"
+                    app:backgroundTint="@color/brand"
+                    app:cornerRadius="14dp" />
+            </LinearLayout>
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:text="접근성 서비스는 사용하지 않아요. Shizuku를 무선 디버깅으로 실행한 뒤 권한 연결만 하면 됩니다." android:textColor="@color/muted" android:textSize="11sp" />
         </LinearLayout>
 
         <LinearLayout
@@ -59,18 +125,20 @@
                 <TextView android:id="@+id/status" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginLeft="9dp" android:text="정지" android:textColor="@color/text" android:textSize="18sp" android:textStyle="bold" />
             </LinearLayout>
             <TextView android:id="@+id/statusDetail" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="4dp" android:text="시작 버튼을 눌러주세요" android:textColor="@color/muted" android:textSize="13sp" />
-            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="16dp" android:text="마지막 인식" android:textColor="@color/muted" android:textSize="11sp" android:textStyle="bold" />
-            <TextView android:id="@+id/lastQuestion" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="4dp" android:maxLines="3" android:text="-" android:textColor="@color/text" android:textSize="14sp" />
-            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="14dp" android:text="추천 답" android:textColor="@color/muted" android:textSize="11sp" android:textStyle="bold" />
+
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="16dp" android:text="현재 기억한 단어" android:textColor="@color/muted" android:textSize="11sp" android:textStyle="bold" />
+            <TextView android:id="@+id/lastQuestion" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="4dp" android:maxLines="2" android:text="-" android:textColor="@color/text" android:textSize="18sp" android:textStyle="bold" />
+
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="14dp" android:text="현재 판단" android:textColor="@color/muted" android:textSize="11sp" android:textStyle="bold" />
             <TextView android:id="@+id/lastAnswer" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="4dp" android:text="-" android:textColor="@color/green" android:textSize="20sp" android:textStyle="bold" />
         </LinearLayout>
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/startBtn"
             android:layout_width="match_parent"
-            android:layout_height="56dp"
+            android:layout_height="58dp"
             android:layout_marginTop="16dp"
-            android:text="화면 분석 시작"
+            android:text="실시간 분석 시작"
             android:textAllCaps="false"
             android:textSize="16sp"
             android:textStyle="bold"
@@ -88,6 +156,6 @@
             app:cornerRadius="16dp"
             app:strokeColor="#D7DDEA" />
 
-        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="16dp" android:gravity="center" android:text="무료 로컬 분석 · 결제 없음 · 민감정보 화면 자동 정지" android:textColor="@color/muted" android:textSize="11sp" />
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="16dp" android:gravity="center" android:text="무료 온디바이스 OCR · 무료 번역 · Shizuku 터치" android:textColor="@color/muted" android:textSize="11sp" />
     </LinearLayout>
 </ScrollView>
