@@ -7,11 +7,11 @@ android {
     compileSdk 35
 
     defaultConfig {
-        applicationId 'com.study.classcardhelper'
+        applicationId 'com.study.studylens.v2free'
         minSdk 26
         targetSdk 35
-        versionCode 2
-        versionName '0.2.0-free'
+        versionCode 3
+        versionName '0.2.1-free-install-fix'
     }
 
     buildTypes {
