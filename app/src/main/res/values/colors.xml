@@ -1,2 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources><color name="brand">#1769AA</color><color name="brand_dark">#0D4777</color><color name="green">#18A558</color><color name="bg">#F5F7FA</color><color name="text">#17202A</color></resources>
+<resources>
+    <color name="brand">#4B5FC7</color>
+    <color name="brand_dark">#324291</color>
+    <color name="green">#16A765</color>
+    <color name="bg">#F4F6FA</color>
+    <color name="text">#172033</color>
+    <color name="muted">#6E788C</color>
+</resources>

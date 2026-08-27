@@ -43,8 +43,6 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class CaptureService extends Service {
@@ -55,8 +53,9 @@ public class CaptureService extends Service {
 
     private static final String CHANNEL = "screen_analysis";
     private static final int NOTIFICATION_ID = 41;
-    private static final long OCR_INTERVAL_MS = 350L;
-    private static final long AI_MIN_INTERVAL_MS = 900L;
+    private static final long OCR_INTERVAL_MS = 320L;
+    private static final long ANSWER_MIN_INTERVAL_MS = 650L;
+    private static final int AUTO_TAP_MIN_CONFIDENCE = 78;
 
     public interface UiListener { void onUpdate(String status, String question, String answer); }
     private static volatile UiListener uiListener;
@@ -67,16 +66,14 @@ public class CaptureService extends Service {
     private ImageReader imageReader;
     private HandlerThread captureThread;
     private Handler captureHandler;
-    private final ExecutorService aiExecutor = Executors.newSingleThreadExecutor();
     private final AtomicBoolean ocrBusy = new AtomicBoolean(false);
-    private final AtomicBoolean aiBusy = new AtomicBoolean(false);
     private TextRecognizer recognizer;
     private SecurePrefs prefs;
     private WindowManager windowManager;
     private TextView answerBubble;
     private View highlight;
     private long lastOcrAt = 0L;
-    private long lastAiAt = 0L;
+    private long lastAnswerAt = 0L;
     private String lastSignature = "";
     private int screenWidth;
     private int screenHeight;
@@ -108,11 +105,9 @@ public class CaptureService extends Service {
         }
         if (ACTION_START.equals(action)) {
             Notification n = buildNotification();
-            if (Build.VERSION.SDK_INT >= 29) {
-                startForeground(NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
-            } else {
-                startForeground(NOTIFICATION_ID, n);
-            }
+            if (Build.VERSION.SDK_INT >= 29) startForeground(NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
+            else startForeground(NOTIFICATION_ID, n);
+
             int resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, -1);
             Intent data;
             if (Build.VERSION.SDK_INT >= 33) data = intent.getParcelableExtra(EXTRA_RESULT_DATA, Intent.class);
@@ -151,16 +146,16 @@ public class CaptureService extends Service {
         }, new Handler(getMainLooper()));
 
         imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2);
-        captureThread = new HandlerThread("screen-capture");
+        captureThread = new HandlerThread("study-lens-capture");
         captureThread.start();
         captureHandler = new Handler(captureThread.getLooper());
         imageReader.setOnImageAvailableListener(this::onImageAvailable, captureHandler);
-        virtualDisplay = projection.createVirtualDisplay("ClassCardAIHelper",
+        virtualDisplay = projection.createVirtualDisplay("StudyLens",
                 screenWidth, screenHeight, density,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                 imageReader.getSurface(), null, captureHandler);
         running = true;
-        showBubble("AI 분석 준비됨");
+        showBubble("무료 로컬 분석 준비됨");
         updateUi("실시간 화면 분석 중", "", "");
     }
 
@@ -202,7 +197,7 @@ public class CaptureService extends Service {
         }).addOnFailureListener(e -> {
             frame.recycle();
             ocrBusy.set(false);
-            updateUi("OCR 오류", "", "");
+            updateUi("글자 인식 오류", "", "");
         });
     }
 
@@ -213,81 +208,138 @@ public class CaptureService extends Service {
             for (Text.Line line : block.getLines()) {
                 String t = line.getText() == null ? "" : line.getText().trim();
                 Rect r = line.getBoundingBox();
-                if (!t.isEmpty() && r != null && !t.toLowerCase(Locale.ROOT).contains("ai 추천")) {
+                String low = t.toLowerCase(Locale.ROOT);
+                if (!t.isEmpty() && r != null && !low.contains("study lens") && !low.contains("무료 로컬 분석")) {
                     lines.add(new LineBox(t, new Rect(r)));
                     full.append(t).append('\n');
                 }
             }
         }
         String screenText = full.toString().trim();
-        if (screenText.length() < 8) return;
+        if (screenText.length() < 6) return;
         if (containsSensitive(screenText)) {
             clearHighlight();
-            showBubble("민감정보 화면 · 분석 일시정지");
+            showBubble("민감정보 화면 · 분석 정지");
             updateUi("민감 화면 감지", shortText(screenText), "");
             return;
         }
 
+        learnPairIfPossible(lines, screenText);
+
         String signature = normalize(screenText);
         if (signature.equals(lastSignature)) return;
         lastSignature = signature;
-        updateUi("새 문제 감지 · AI 판단 중", shortText(screenText), "");
-        maybeAskAi(screenText, lines);
-    }
-
-    private void maybeAskAi(String text, List<LineBox> lines) {
         long now = System.currentTimeMillis();
-        if (now - lastAiAt < AI_MIN_INTERVAL_MS || !aiBusy.compareAndSet(false, true)) return;
-        lastAiAt = now;
-        String apiKey = prefs.getApiKey();
-        String model = prefs.getModel();
-        if (apiKey.isEmpty()) {
-            aiBusy.set(false);
-            showBubble("API 키 필요");
-            updateUi("API 키 필요", shortText(text), "");
+        if (now - lastAnswerAt < ANSWER_MIN_INTERVAL_MS) return;
+        lastAnswerAt = now;
+
+        List<String> choices = likelyChoices(lines);
+        LocalEnglishSolver.Answer answer = LocalEnglishSolver.solve(screenText, choices, prefs.getLearnedPairs());
+        updateUi("새 문제 분석 완료", shortText(screenText), answer.text.isEmpty() ? "판단 보류" : answer.text + " (" + answer.confidence + "%)");
+
+        if (answer.text.isEmpty() || answer.confidence < 45) {
+            clearHighlight();
+            if (prefs.isHighlightEnabled()) showBubble("확신 부족 · 직접 풀어주세요");
             return;
         }
 
-        aiExecutor.execute(() -> {
-            try {
-                OpenAiClient.Answer answer = OpenAiClient.solve(apiKey, model, text);
-                if (answer.text.isEmpty() || answer.confidence < 45) {
-                    clearHighlight();
-                    showBubble("확신 부족 · 직접 풀어주세요");
-                    updateUi("AI 확신 부족", shortText(text), "");
-                } else {
-                    LineBox best = findBestLine(answer.text, lines);
-                    if (best != null) showAnswer(answer, best.rect);
-                    else showAnswer(answer, null);
-                    updateUi("추천 완료", shortText(text), answer.text + "  (" + answer.confidence + "%)");
-                }
-            } catch (Exception e) {
-                clearHighlight();
-                showBubble("AI 연결 오류");
-                updateUi("AI 오류: " + safeMessage(e), shortText(text), "");
-            } finally {
-                aiBusy.set(false);
-            }
-        });
+        LineBox best = findBestLine(answer.text, lines);
+        boolean assessment = containsAssessment(screenText);
+        presentAnswer(answer, best == null ? null : best.rect, assessment);
     }
 
-    private void showAnswer(OpenAiClient.Answer answer, Rect rect) {
-        showBubble("AI 추천: " + answer.text + " · " + answer.confidence + "%");
-        if (rect == null) {
+    private void presentAnswer(LocalEnglishSolver.Answer answer, Rect rect, boolean assessment) {
+        if (prefs.isHighlightEnabled()) {
+            showBubble("추천: " + answer.text + " · " + answer.confidence + "%");
+            if (rect != null) showHighlight(rect);
+            else clearHighlight();
+        } else {
             clearHighlight();
+            removeBubbleOnly();
+        }
+
+        if (!prefs.isAutoTapEnabled() || rect == null || answer.confidence < AUTO_TAP_MIN_CONFIDENCE) return;
+        if (assessment) {
+            if (prefs.isHighlightEnabled()) showBubble("평가/점수 화면 · 자동 터치 OFF");
+            updateUi("평가 화면에서 자동 터치 차단", "", answer.text);
             return;
         }
+        if (!StudyAccessibilityService.isReady()) {
+            if (prefs.isHighlightEnabled()) showBubble("자동 터치 권한을 켜주세요");
+            updateUi("자동 터치 권한 필요", "", answer.text);
+            return;
+        }
+
+        final float x = rect.exactCenterX();
+        final float y = rect.exactCenterY();
+        new Handler(getMainLooper()).postDelayed(() -> {
+            boolean ok = StudyAccessibilityService.tap(x, y);
+            if (ok) {
+                if (prefs.isHighlightEnabled()) showBubble("연습 자동 선택 ✓  " + answer.text);
+                updateUi("연습 자동 터치 완료", "", answer.text);
+            } else {
+                if (prefs.isHighlightEnabled()) showBubble("ClassCard 화면에서만 자동 터치 가능");
+                updateUi("자동 터치 대기", "", answer.text);
+            }
+        }, 380L);
+    }
+
+    private List<String> likelyChoices(List<LineBox> lines) {
+        List<String> out = new ArrayList<>();
+        int cutoff = (int)(screenHeight * 0.30f);
+        for (LineBox l : lines) {
+            String t = l.text.trim();
+            if (l.rect.centerY() < cutoff) continue;
+            if (t.length() > 70 || t.length() < 1) continue;
+            String low = t.toLowerCase(Locale.ROOT);
+            if (low.contains("classcard") || low.contains("study lens") || low.contains("점수") || low.contains("남은 시간") || low.contains("다음")) continue;
+            out.add(t);
+        }
+        if (out.size() < 2) {
+            out.clear();
+            int start = Math.max(0, lines.size() - 6);
+            for (int i = start; i < lines.size(); i++) out.add(lines.get(i).text);
+        }
+        return out;
+    }
+
+    private void learnPairIfPossible(List<LineBox> lines, String screenText) {
+        if (containsAssessment(screenText) || screenText.contains("___") || screenText.contains("____")) return;
+        List<String> english = new ArrayList<>();
+        List<String> korean = new ArrayList<>();
+        for (LineBox l : lines) {
+            String t = l.text.trim();
+            if (t.length() > 42) continue;
+            if (t.matches("[A-Za-z][A-Za-z' -]{1,35}") && t.split("\\s+").length <= 5 && !isUiLine(t)) english.add(t);
+            if (t.matches(".*[가-힣].*") && !isUiLine(t) && t.length() <= 32) korean.add(t);
+        }
+        if (english.size() == 1 && korean.size() == 1) prefs.saveLearnedPair(english.get(0), korean.get(0));
+    }
+
+    private boolean isUiLine(String s) {
+        String n = s.toLowerCase(Locale.ROOT);
+        return n.contains("classcard") || n.contains("정답") || n.contains("다음") || n.contains("학습") || n.contains("점수") || n.contains("study lens");
+    }
+
+    private boolean containsAssessment(String s) {
+        String n = s.toLowerCase(Locale.ROOT);
+        String[] keys = {"점수", "성적", "제출", "평가", "시험", "과제", "숙제", "선생님", "score", "submit", "grade", "result", "ranking", "제한시간"};
+        for (String k : keys) if (n.contains(k)) return true;
+        return false;
+    }
+
+    private void showHighlight(Rect rect) {
         new Handler(getMainLooper()).post(() -> {
             clearHighlightInternal();
             GradientDrawable bg = new GradientDrawable();
-            bg.setColor(0x1818A558);
-            bg.setStroke(dp(4), 0xFF18A558);
-            bg.setCornerRadius(dp(12));
+            bg.setColor(0x1819C37D);
+            bg.setStroke(dp(4), 0xFF16A765);
+            bg.setCornerRadius(dp(16));
             View v = new View(this);
             v.setBackground(bg);
             WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
-                    Math.max(dp(60), rect.width() + dp(20)),
-                    Math.max(dp(40), rect.height() + dp(16)),
+                    Math.max(dp(64), rect.width() + dp(22)),
+                    Math.max(dp(44), rect.height() + dp(18)),
                     Build.VERSION.SDK_INT >= 26 ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY : WindowManager.LayoutParams.TYPE_PHONE,
                     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE |
                             WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE |
@@ -295,25 +347,26 @@ public class CaptureService extends Service {
                             WindowManager.LayoutParams.FLAG_SECURE,
                     PixelFormat.TRANSLUCENT);
             lp.gravity = Gravity.TOP | Gravity.START;
-            lp.x = Math.max(0, rect.left - dp(10));
-            lp.y = Math.max(0, rect.top - dp(8));
+            lp.x = Math.max(0, rect.left - dp(11));
+            lp.y = Math.max(0, rect.top - dp(9));
             try {
                 windowManager.addView(v, lp);
                 highlight = v;
-            } catch (Exception ignored) {}
+            } catch (Exception ignored) { }
         });
     }
 
     private void showBubble(String text) {
+        if (!prefs.isHighlightEnabled() && !text.contains("민감정보")) return;
         new Handler(getMainLooper()).post(() -> {
             if (answerBubble == null) {
                 TextView tv = new TextView(this);
                 tv.setTextColor(Color.WHITE);
-                tv.setTextSize(14f);
-                tv.setPadding(dp(12), dp(8), dp(12), dp(8));
+                tv.setTextSize(13f);
+                tv.setPadding(dp(14), dp(9), dp(14), dp(9));
                 GradientDrawable bg = new GradientDrawable();
-                bg.setColor(0xE817202A);
-                bg.setCornerRadius(dp(18));
+                bg.setColor(0xED172033);
+                bg.setCornerRadius(dp(22));
                 tv.setBackground(bg);
                 WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
                         WindowManager.LayoutParams.WRAP_CONTENT,
@@ -325,7 +378,7 @@ public class CaptureService extends Service {
                                 WindowManager.LayoutParams.FLAG_SECURE,
                         PixelFormat.TRANSLUCENT);
                 lp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
-                lp.y = dp(54);
+                lp.y = dp(50);
                 try {
                     windowManager.addView(tv, lp);
                     answerBubble = tv;
@@ -335,13 +388,20 @@ public class CaptureService extends Service {
         });
     }
 
-    private void clearHighlight() {
-        new Handler(getMainLooper()).post(this::clearHighlightInternal);
+    private void removeBubbleOnly() {
+        new Handler(getMainLooper()).post(() -> {
+            if (answerBubble != null) {
+                try { windowManager.removeView(answerBubble); } catch (Exception ignored) { }
+                answerBubble = null;
+            }
+        });
     }
+
+    private void clearHighlight() { new Handler(getMainLooper()).post(this::clearHighlightInternal); }
 
     private void clearHighlightInternal() {
         if (highlight != null) {
-            try { windowManager.removeView(highlight); } catch (Exception ignored) {}
+            try { windowManager.removeView(highlight); } catch (Exception ignored) { }
             highlight = null;
         }
     }
@@ -350,7 +410,7 @@ public class CaptureService extends Service {
         new Handler(getMainLooper()).post(() -> {
             clearHighlightInternal();
             if (answerBubble != null) {
-                try { windowManager.removeView(answerBubble); } catch (Exception ignored) {}
+                try { windowManager.removeView(answerBubble); } catch (Exception ignored) { }
                 answerBubble = null;
             }
         });
@@ -361,15 +421,15 @@ public class CaptureService extends Service {
         LineBox best = null;
         double bestScore = 0.0;
         for (LineBox line : lines) {
-            String b = normalize(line.text);
+            String b = normalize(line.text.replaceFirst("^[A-Da-d][.)]\\s*", ""));
             if (b.isEmpty()) continue;
             double score;
             if (b.equals(a)) score = 1.0;
-            else if (b.contains(a) || a.contains(b)) score = 0.92;
+            else if (b.contains(a) || a.contains(b)) score = 0.93;
             else score = similarity(a, b);
             if (score > bestScore) { bestScore = score; best = line; }
         }
-        return bestScore >= 0.50 ? best : null;
+        return bestScore >= 0.52 ? best : null;
     }
 
     private static double similarity(String a, String b) {
@@ -394,19 +454,11 @@ public class CaptureService extends Service {
         return false;
     }
 
-    private static String normalize(String s) {
-        return s == null ? "" : s.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9가-힣]+", " ").trim();
-    }
+    private static String normalize(String s) { return s == null ? "" : s.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9가-힣]+", " ").trim(); }
 
     private static String shortText(String s) {
         String one = s.replace('\n', ' ').replaceAll("\\s+", " ").trim();
         return one.length() > 180 ? one.substring(0, 180) + "…" : one;
-    }
-
-    private static String safeMessage(Throwable t) {
-        String m = t.getMessage();
-        if (m == null || m.isEmpty()) return t.getClass().getSimpleName();
-        return m.length() > 100 ? m.substring(0, 100) : m;
     }
 
     private void updateUi(String status, String question, String answer) {
@@ -417,15 +469,13 @@ public class CaptureService extends Service {
     private Notification buildNotification() {
         Intent stop = new Intent(this, CaptureService.class);
         stop.setAction(ACTION_STOP);
-        PendingIntent stopPi = PendingIntent.getService(this, 2, stop,
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        PendingIntent stopPi = PendingIntent.getService(this, 2, stop, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         Intent open = new Intent(this, MainActivity.class);
-        PendingIntent openPi = PendingIntent.getActivity(this, 3, open,
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        PendingIntent openPi = PendingIntent.getActivity(this, 3, open, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         return new NotificationCompat.Builder(this, CHANNEL)
                 .setSmallIcon(android.R.drawable.ic_menu_view)
-                .setContentTitle("ClassCard AI Helper")
-                .setContentText("화면의 영어 연습 문제를 분석 중")
+                .setContentTitle("ClassCard Study Lens")
+                .setContentText("무료 로컬 화면 분석 실행 중")
                 .setOngoing(true)
                 .setContentIntent(openPi)
                 .addAction(android.R.drawable.ic_media_pause, "즉시 중지", stopPi)
@@ -435,7 +485,7 @@ public class CaptureService extends Service {
     private void createChannel() {
         if (Build.VERSION.SDK_INT >= 26) {
             NotificationChannel ch = new NotificationChannel(CHANNEL, "실시간 화면 분석", NotificationManager.IMPORTANCE_LOW);
-            ch.setDescription("화면 공유 기반 영어 학습 분석이 실행 중임을 표시합니다.");
+            ch.setDescription("영어 학습 화면을 기기에서 분석합니다.");
             getSystemService(NotificationManager.class).createNotificationChannel(ch);
         }
     }
@@ -454,14 +504,11 @@ public class CaptureService extends Service {
     @Override
     public void onDestroy() {
         stopEverything();
-        try { recognizer.close(); } catch (Exception ignored) {}
-        aiExecutor.shutdownNow();
+        try { recognizer.close(); } catch (Exception ignored) { }
         super.onDestroy();
     }
 
-    private int dp(int v) {
-        return Math.round(v * getResources().getDisplayMetrics().density);
-    }
+    private int dp(int v) { return Math.round(v * getResources().getDisplayMetrics().density); }
 
     @Nullable
     @Override public IBinder onBind(Intent intent) { return null; }

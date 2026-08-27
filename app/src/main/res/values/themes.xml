@@ -1,2 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources><style name="Theme.ClassCardAIHelper" parent="Theme.MaterialComponents.DayNight.NoActionBar"><item name="colorPrimary">@color/brand</item><item name="colorPrimaryVariant">@color/brand_dark</item><item name="android:fontFamily">sans</item><item name="android:windowLightStatusBar">true</item><item name="android:navigationBarColor">@color/bg</item><item name="android:statusBarColor">@color/bg</item></style></resources>
+<resources>
+    <style name="Theme.ClassCardAIHelper" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/brand</item>
+        <item name="colorPrimaryVariant">@color/brand_dark</item>
+        <item name="colorSecondary">@color/green</item>
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:navigationBarColor">@color/bg</item>
+        <item name="android:statusBarColor">@color/bg</item>
+        <item name="android:windowActionModeOverlay">true</item>
+    </style>
+</resources>

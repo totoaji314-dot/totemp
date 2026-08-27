@@ -1,11 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <application android:allowBackup="true" android:label="ClassCard AI Helper" android:theme="@style/Theme.ClassCardAIHelper" android:usesCleartextTraffic="false">
+    <application android:allowBackup="true" android:label="@string/app_name" android:theme="@style/Theme.ClassCardAIHelper" android:usesCleartextTraffic="false">
         <activity android:name=".MainActivity" android:exported="true" android:screenOrientation="unspecified">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -13,5 +12,11 @@
             </intent-filter>
         </activity>
         <service android:name=".CaptureService" android:exported="false" android:foregroundServiceType="mediaProjection" />
+        <service android:name=".StudyAccessibilityService" android:exported="false" android:label="Study Lens 터치 도우미" android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data android:name="android.accessibilityservice" android:resource="@xml/accessibility_service_config" />
+        </service>
     </application>
 </manifest>

@@ -1,14 +1,62 @@
 package com.study.classcardhelper;
-import android.content.*; import android.security.keystore.*; import android.util.Base64; import java.nio.charset.StandardCharsets; import java.security.KeyStore; import javax.crypto.*; import javax.crypto.spec.GCMParameterSpec;
+
+import android.content.Context;
+import android.content.SharedPreferences;
+
+import java.util.HashMap;
+import java.util.Locale;
+import java.util.Map;
+
 public final class SecurePrefs {
- private static final String PREF="secure_settings",ALIAS="classcard_helper_key",KEY_API="api",KEY_MODEL="model"; private final SharedPreferences prefs;
- public SecurePrefs(Context c){prefs=c.getSharedPreferences(PREF,Context.MODE_PRIVATE);ensureKey();}
- public void saveApiKey(String v){prefs.edit().putString(KEY_API,encrypt(v==null?"":v)).apply();}
- public String getApiKey(){String e=prefs.getString(KEY_API,"");return e.isEmpty()?"":decrypt(e);}
- public void saveModel(String v){prefs.edit().putString(KEY_MODEL,v==null||v.trim().isEmpty()?"gpt-5.6":v.trim()).apply();}
- public String getModel(){return prefs.getString(KEY_MODEL,"gpt-5.6");}
- private static void ensureKey(){try{KeyStore ks=KeyStore.getInstance("AndroidKeyStore");ks.load(null);if(!ks.containsAlias(ALIAS)){KeyGenerator kg=KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES,"AndroidKeyStore");kg.init(new KeyGenParameterSpec.Builder(ALIAS,KeyProperties.PURPOSE_ENCRYPT|KeyProperties.PURPOSE_DECRYPT).setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).build());kg.generateKey();}}catch(Exception e){throw new IllegalStateException(e);}}
- private static SecretKey key()throws Exception{KeyStore ks=KeyStore.getInstance("AndroidKeyStore");ks.load(null);return(SecretKey)ks.getKey(ALIAS,null);}
- private static String encrypt(String p){try{Cipher c=Cipher.getInstance("AES/GCM/NoPadding");c.init(Cipher.ENCRYPT_MODE,key());byte[]iv=c.getIV(),ct=c.doFinal(p.getBytes(StandardCharsets.UTF_8)),all=new byte[iv.length+ct.length];System.arraycopy(iv,0,all,0,iv.length);System.arraycopy(ct,0,all,iv.length,ct.length);return Base64.encodeToString(all,Base64.NO_WRAP);}catch(Exception e){return"";}}
- private static String decrypt(String e){try{byte[]all=Base64.decode(e,Base64.NO_WRAP),iv=new byte[12],ct=new byte[all.length-12];System.arraycopy(all,0,iv,0,12);System.arraycopy(all,12,ct,0,ct.length);Cipher c=Cipher.getInstance("AES/GCM/NoPadding");c.init(Cipher.DECRYPT_MODE,key(),new GCMParameterSpec(128,iv));return new String(c.doFinal(ct),StandardCharsets.UTF_8);}catch(Exception ex){return"";}}
+    private static final String PREF = "study_lens_settings_v2";
+    private static final String KEY_HIGHLIGHT = "highlight_enabled";
+    private static final String KEY_AUTOTAP = "auto_tap_enabled";
+    private static final String LEARN_PREFIX = "learn_";
+
+    private final SharedPreferences prefs;
+
+    public SecurePrefs(Context context) {
+        prefs = context.getSharedPreferences(PREF, Context.MODE_PRIVATE);
+    }
+
+    public boolean isHighlightEnabled() {
+        return prefs.getBoolean(KEY_HIGHLIGHT, true);
+    }
+
+    public void setHighlightEnabled(boolean enabled) {
+        prefs.edit().putBoolean(KEY_HIGHLIGHT, enabled).apply();
+    }
+
+    public boolean isAutoTapEnabled() {
+        return prefs.getBoolean(KEY_AUTOTAP, false);
+    }
+
+    public void setAutoTapEnabled(boolean enabled) {
+        prefs.edit().putBoolean(KEY_AUTOTAP, enabled).apply();
+    }
+
+    public void saveLearnedPair(String english, String korean) {
+        String key = normalizeEnglish(english);
+        String value = korean == null ? "" : korean.trim();
+        if (key.length() < 2 || value.length() < 1) return;
+        prefs.edit().putString(LEARN_PREFIX + key, value).apply();
+    }
+
+    public Map<String, String> getLearnedPairs() {
+        Map<String, String> out = new HashMap<>();
+        for (Map.Entry<String, ?> entry : prefs.getAll().entrySet()) {
+            if (!entry.getKey().startsWith(LEARN_PREFIX) || !(entry.getValue() instanceof String)) continue;
+            String k = entry.getKey().substring(LEARN_PREFIX.length());
+            String v = (String) entry.getValue();
+            if (!k.isEmpty() && !v.isEmpty()) out.put(k, v);
+        }
+        return out;
+    }
+
+    private static String normalizeEnglish(String s) {
+        return s == null ? "" : s.toLowerCase(Locale.ROOT)
+                .replaceAll("[^a-z' -]", " ")
+                .replaceAll("\\s+", " ")
+                .trim();
+    }
 }
