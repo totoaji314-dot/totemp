@@ -7,11 +7,11 @@ android {
     compileSdk 35
 
     defaultConfig {
-        applicationId 'com.study.studylens.v2free'
+        applicationId 'com.study.studylens.displayonly'
         minSdk 26
         targetSdk 35
-        versionCode 3
-        versionName '0.2.1-free-install-fix'
+        versionCode 4
+        versionName '0.2.2-display-only'
     }
 
     buildTypes {
