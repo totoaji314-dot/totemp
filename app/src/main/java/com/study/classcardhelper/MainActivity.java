@@ -23,9 +23,12 @@ import com.google.android.material.switchmaterial.SwitchMaterial;
 public class MainActivity extends AppCompatActivity {
     private SecurePrefs prefs;
     private SwitchMaterial highlightSwitch;
+    private SwitchMaterial autoTapSwitch;
     private TextView status;
     private TextView lastQuestion;
     private TextView lastAnswer;
+    private TextView shizukuStatus;
+    private TextView modelStatus;
 
     private final ActivityResultLauncher<Intent> captureLauncher = registerForActivityResult(
             new ActivityResultContracts.StartActivityForResult(), result -> {
@@ -35,8 +38,8 @@ public class MainActivity extends AppCompatActivity {
                     service.putExtra(CaptureService.EXTRA_RESULT_CODE, result.getResultCode());
                     service.putExtra(CaptureService.EXTRA_RESULT_DATA, result.getData());
                     ContextCompat.startForegroundService(this, service);
-                    setStatus("분석 중", "ClassCard 화면을 보고 있어요");
-                    Toast.makeText(this, "ClassCard를 열면 화면을 읽기 시작합니다.", Toast.LENGTH_LONG).show();
+                    setStatus("분석 중", "영어 단어를 기다리고 있어요");
+                    Toast.makeText(this, "ClassCard를 열면 5초 단어 → 4지선다를 자동 추적합니다.", Toast.LENGTH_LONG).show();
                 } else {
                     setStatus("정지", "화면 공유가 취소됐어요");
                 }
@@ -48,19 +51,44 @@ public class MainActivity extends AppCompatActivity {
         setContentView(R.layout.activity_main);
 
         prefs = new SecurePrefs(this);
-        prefs.setAutoTapEnabled(false);
         highlightSwitch = findViewById(R.id.highlightSwitch);
+        autoTapSwitch = findViewById(R.id.autoTapSwitch);
         status = findViewById(R.id.status);
         lastQuestion = findViewById(R.id.lastQuestion);
         lastAnswer = findViewById(R.id.lastAnswer);
+        shizukuStatus = findViewById(R.id.shizukuStatus);
+        modelStatus = findViewById(R.id.modelStatus);
+
         MaterialButton startBtn = findViewById(R.id.startBtn);
         MaterialButton stopBtn = findViewById(R.id.stopBtn);
+        MaterialButton shizukuBtn = findViewById(R.id.shizukuBtn);
+        MaterialButton openShizukuBtn = findViewById(R.id.openShizukuBtn);
+        MaterialButton modelBtn = findViewById(R.id.modelBtn);
 
         highlightSwitch.setChecked(prefs.isHighlightEnabled());
+        autoTapSwitch.setChecked(prefs.isAutoTapEnabled());
+
         highlightSwitch.setOnCheckedChangeListener((buttonView, isChecked) -> {
             prefs.setHighlightEnabled(isChecked);
             Toast.makeText(this, isChecked ? "정답 표시 ON" : "정답 표시 OFF", Toast.LENGTH_SHORT).show();
         });
+
+        autoTapSwitch.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            prefs.setAutoTapEnabled(isChecked);
+            if (isChecked && !ShizukuTapManager.isReady()) {
+                Toast.makeText(this, "자동 터치는 Shizuku 연결 후 작동합니다.", Toast.LENGTH_LONG).show();
+            }
+        });
+
+        ShizukuTapManager.init(this);
+        ShizukuTapManager.setStatusListener(s -> runOnUiThread(() -> shizukuStatus.setText(s)));
+        ShizukuTapManager.refreshStatus();
+
+        shizukuBtn.setOnClickListener(v -> ShizukuTapManager.requestPermissionAndBind());
+        openShizukuBtn.setOnClickListener(v -> openShizuku());
+
+        modelBtn.setOnClickListener(v -> prepareModel());
+        prepareModel();
 
         startBtn.setOnClickListener(v -> startFlow());
         stopBtn.setOnClickListener(v -> stopServiceFlow());
@@ -71,12 +99,41 @@ public class MainActivity extends AppCompatActivity {
             if (a != null && !a.isEmpty()) lastAnswer.setText(a);
         }));
 
-        setStatus("정지", "시작 버튼을 눌러주세요");
+        setStatus("정지", "1. 번역 모델 준비 → 2. Shizuku 연결 → 3. 화면 분석 시작");
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        ShizukuTapManager.refreshStatus();
+    }
+
+    private void prepareModel() {
+        modelStatus.setText("무료 번역 모델 확인 중…");
+        OfflineTranslator.get(this).ensureModel((ready, message) -> runOnUiThread(() -> {
+            modelStatus.setText(message);
+            if (ready) Toast.makeText(this, "영어→한국어 오프라인 번역 준비 완료", Toast.LENGTH_SHORT).show();
+        }));
+    }
+
+    private void openShizuku() {
+        try {
+            Intent launch = getPackageManager().getLaunchIntentForPackage("moe.shizuku.privileged.api");
+            if (launch != null) {
+                startActivity(launch);
+                return;
+            }
+        } catch (Throwable ignored) {}
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://shizuku.rikka.app/download/")));
+        } catch (Throwable t) {
+            Toast.makeText(this, "Shizuku를 설치해주세요.", Toast.LENGTH_LONG).show();
+        }
     }
 
     private void startFlow() {
         prefs.setHighlightEnabled(highlightSwitch.isChecked());
-        prefs.setAutoTapEnabled(false);
+        prefs.setAutoTapEnabled(autoTapSwitch.isChecked());
 
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 1001);
@@ -85,6 +142,9 @@ public class MainActivity extends AppCompatActivity {
             startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + getPackageName())));
             Toast.makeText(this, "'다른 앱 위에 표시'를 허용한 뒤 다시 시작해주세요.", Toast.LENGTH_LONG).show();
             return;
+        }
+        if (autoTapSwitch.isChecked() && !ShizukuTapManager.isReady()) {
+            Toast.makeText(this, "Shizuku 자동 터치가 아직 연결되지 않았습니다. 정답 표시는 작동합니다.", Toast.LENGTH_LONG).show();
         }
         MediaProjectionManager mgr = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
         captureLauncher.launch(mgr.createScreenCaptureIntent());
@@ -108,5 +168,6 @@ public class MainActivity extends AppCompatActivity {
     protected void onDestroy() {
         super.onDestroy();
         CaptureService.setUiListener(null);
+        ShizukuTapManager.setStatusListener(null);
     }
 }
